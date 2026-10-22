@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hetzner Dashboard</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --text:#1c2230; --muted:#6b7385; --line:#e3e6ec;
+    --accent:#d50c2d; --ok:#1a8f4c; --warn:#c77d00; --bad:#c62828;
+    --c1:#2563eb; --c2:#d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1218; --card:#171b24; --text:#e6e9f0; --muted:#8c94a7; --line:#262c39;
+            --accent:#ff4d66; --ok:#3ecf7e; --warn:#f0a93b; --bad:#ff6b6b; --c1:#6ea0ff; --c2:#f0a93b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--line); background:var(--card); }
+  h1 { font-size:18px; margin:0; } h1 span { color:var(--accent); }
+  .muted { color:var(--muted); }
+  main { max-width:1200px; margin:0 auto; padding:20px 16px 48px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .kpi .v { font-size:26px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .kpi .l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  tbody tr { cursor:pointer; } tbody tr:hover, tbody tr.sel { background:color-mix(in srgb,var(--accent) 7%,transparent); }
+  .tablewrap { overflow-x:auto; padding:0; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; background:var(--muted); }
+  .dot.running { background:var(--ok); } .dot.off { background:var(--bad); }
+  .dot.starting,.dot.stopping,.dot.initializing,.dot.migrating,.dot.rebuilding { background:var(--warn); }
+  .bar { height:6px; border-radius:3px; background:var(--line); width:90px; overflow:hidden; display:inline-block; vertical-align:middle; }
+  .bar i { display:block; height:100%; background:var(--c1); }
+  .bar.hot i { background:var(--warn); }
+  #detail { margin-top:20px; }
+  .detail-head { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+  .range button { background:none; border:1px solid var(--line); color:var(--text); padding:4px 10px; cursor:pointer; font:inherit; }
+  .range button:first-child { border-radius:6px 0 0 6px; } .range button:last-child { border-radius:0 6px 6px 0; }
+  .range button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; }
+  .chart h3 { margin:0 0 6px; font-size:13px; }
+  .legend { font-size:12px; color:var(--muted); } .legend b { display:inline-block; width:10px; height:3px; margin:0 4px 3px 10px; } .legend b:first-child { margin-left:0; }
+  svg { width:100%; height:150px; display:block; }
+  svg text { fill:var(--muted); font-size:10px; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:12px; margin-top:20px; }
+  h3.sec { margin:0 0 10px; font-size:13px; }
+  .brow { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid var(--line); }
+  .brow.total { font-weight:650; border:0; padding-top:8px; }
+  .brow.zero { color:var(--muted); }
+  .tag { border-radius:4px; padding:1px 6px; font-size:12px; }
+  .tag.ok { background:color-mix(in srgb,var(--ok) 18%,transparent); color:var(--ok); }
+  .tag.bad { background:color-mix(in srgb,var(--bad) 18%,transparent); color:var(--bad); }
+  .tag.idle { background:color-mix(in srgb,var(--warn) 22%,transparent); color:var(--warn); }
+  .rgroup { margin-bottom:10px; } .rgroup summary { cursor:pointer; font-weight:550; }
+  .rgroup .brow { font-size:13px; }
+  .warn { color:var(--warn); padding:8px 0; }
+  .pcol { display:none; } body.multi .pcol { display:table-cell; }
+  .err { color:var(--bad); padding:16px; }
+  .labels span { background:var(--line); border-radius:4px; padding:1px 6px; margin-right:4px; font-size:12px; }
+  button.refresh { background:var(--card); border:1px solid var(--line); color:var(--text); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>●</span> Hetzner Cloud</h1>
+  <div><span class="muted" id="updated"></span> <button class="refresh" id="refresh">Refresh</button></div>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <div class="card tablewrap"><table>
+    <thead><tr><th class="pcol">Project</th><th>Server</th><th>Status</th><th>Type</th><th>Location</th><th>IPv4</th><th>Backups</th><th>Traffic out</th><th>€ / month</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="9" class="muted">Loading…</td></tr></tbody>
+  </table></div>
+  <div id="warnings"></div>
+  <div class="grid2">
+    <div class="card"><h3 class="sec">Monthly cost breakdown</h3><div id="breakdown"></div></div>
+    <div class="card"><h3 class="sec">Other resources</h3><div id="resources"></div></div>
+  </div>
+  <div class="card" id="storage" style="margin-top:20px" hidden></div>
+  <div id="detail" class="card" hidden></div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const eur = (n) => n == null ? "–" : new Intl.NumberFormat(undefined, {style:"currency",currency:"EUR"}).format(n);
+const bytes = (n) => { if (n == null) return "–"; const u=["B","KB","MB","GB","TB"]; let i=0; while (n>=1024 && i<4) { n/=1024; i++; } return n.toFixed(i?1:0)+" "+u[i]; };
+const bits = (n) => { const u=["bit/s","Kbit/s","Mbit/s","Gbit/s"]; let i=0; while (n>=1000 && i<3) { n/=1000; i++; } return n.toFixed(i?1:0)+" "+u[i]; };
+
+let servers = [], selected = null, hours = 24;
+
+async function api(path) {
+  const r = await fetch(path);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+const BREAKDOWN = [
+  ["servers","Servers"],["backups","Server backups"],["primaryIps","Primary IPs (assigned)"],
+  ["attachedVolumes","Volumes (attached)"],["floatingIps","Floating IPs"],["snapshots","Snapshots"],
+  ["loadBalancers","Load balancers"],["overage","Traffic overage (est.)"],
+  ["unattachedVolumes","Volumes (unattached)"],["unassignedPrimaryIps","Primary IPs (unassigned)"],
+];
+
+function resourceGroup(title, items, line) {
+  if (!items.length) return "";
+  const total = items.reduce((n, i) => n + i.cost, 0);
+  return `<details class="rgroup"><summary>${title} (${items.length}) <span class="muted">· ${eur(total)}</span></summary>${
+    items.map((i) => `<div class="brow"><span>${line(i)}${document.body.classList.contains("multi") ? ` <span class="muted">[${esc(i.project)}]</span>` : ""}</span><span>${eur(i.cost)}</span></div>`).join("")}</details>`;
+}
+const idleTag = (attached) => attached ? "" : ` <span class="tag idle">unattached</span>`;
+const srvName = (id) => servers.find((s) => s.id === id)?.name || "server " + id;
+
+function renderStorage({ storageBoxes: sb, totals }) {
+  const el = $("#storage");
+  el.hidden = !sb.items.length;
+  if (!sb.items.length) return;
+  el.innerHTML = `<h3 class="sec">Storage Boxes <span class="muted">· ${eur(sb.total)} / month · not included in the total above</span></h3>
+    <div class="tablewrap"><table><thead><tr><th class="pcol">Project</th><th>Name</th><th>Status</th><th>Type</th><th>Location</th><th>Used</th><th>€ / month</th></tr></thead><tbody>${
+    sb.items.map((b) => {
+      const pct = b.capacity && b.used != null ? b.used / b.capacity : 0;
+      return `<tr style="cursor:default"><td class="pcol">${esc(b.project)}</td><td><b>${esc(b.name)}</b></td>
+        <td><span class="dot ${b.status === "active" ? "running" : "starting"}"></span>${esc(b.status)}</td>
+        <td>${esc(b.type || "–")}</td><td>${esc(b.location || "–")}</td>
+        <td><span class="bar ${pct>.9?'hot':''}"><i style="width:${Math.min(pct*100,100)}%"></i></span>
+          <span class="muted">${bytes(b.used)} / ${bytes(b.capacity)}${b.snapshots ? " · snapshots " + bytes(b.snapshots) : ""}</span></td>
+        <td>${b.cost == null ? "–" : eur(b.cost)}</td></tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
+function renderExtras({ totals, resources: r, warnings }) {
+  $("#warnings").innerHTML = (warnings || []).map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("");
+  $("#breakdown").innerHTML = BREAKDOWN.map(([k, l]) => {
+    const v = totals.breakdown[k];
+    return `<div class="brow ${v ? "" : "zero"}"><span>${l}</span><span>${eur(v)}</span></div>`;
+  }).join("") + `<div class="brow total"><span>Total / month</span><span>${eur(totals.monthlyCost)}</span></div>
+    <div class="muted" style="font-size:12px">${totals.basis === 'net' ? 'Net prices, excl. VAT' : 'Gross prices, incl. VAT'}. Overage = outgoing traffic above each server's included amount.</div>`;
+  $("#resources").innerHTML =
+    resourceGroup("Volumes", r.volumes, (v) => `${esc(v.name)} · ${v.sizeGb} GB${v.server ? " → " + esc(srvName(v.server)) : ""}${idleTag(v.server)}`) +
+    resourceGroup("Primary IPs", r.primaryIps, (i) => `${esc(i.ip)} <span class="muted">${esc(i.type)}</span>${i.server ? " → " + esc(srvName(i.server)) : ""}${idleTag(i.server)}`) +
+    resourceGroup("Floating IPs", r.floatingIps, (i) => `${esc(i.ip)} <span class="muted">${esc(i.name || "")}</span>${i.server ? " → " + esc(srvName(i.server)) : ""}${idleTag(i.server)}`) +
+    resourceGroup("Snapshots", r.snapshots, (i) => `${esc(i.name)} <span class="muted">${i.sizeGb ? i.sizeGb.toFixed(1) + " GB" : ""}${i.from ? " · from " + esc(i.from) : ""}</span>`) +
+    resourceGroup("Load balancers", r.loadBalancers, (l) => `${esc(l.name)} <span class="muted">${esc(l.type)} · ${l.targets} targets</span>`) ||
+    `<div class="muted">None</div>`;
+}
+
+async function load() {
+  try {
+    const data = await api("/api/servers");
+    const { servers: list, totals } = data;
+    document.body.classList.toggle("multi", !!data.multi);
+    servers = list;
+    const idle = totals.idle.volumes + totals.idle.ips;
+    $("#kpis").innerHTML = [
+      ["Servers", `${totals.running} / ${totals.count} running`, ""],
+      ["Backups enabled", `${totals.backupsEnabled} / ${totals.count}`, totals.noBackups.length ? "bad" : ""],
+      ["Monthly cost", eur(totals.monthlyCost), ""],
+      ["Idle resources", idle, idle ? "idle" : ""],
+    ].map(([l,v,c]) => `<div class="card kpi"><div class="v" style="${c==="bad"?"color:var(--bad)":c==="idle"?"color:var(--warn)":""}">${esc(v)}</div><div class="l">${l}</div></div>`).join("");
+    $("#rows").innerHTML = list.map((s) => {
+      const used = s.traffic.included ? s.traffic.out / s.traffic.included : 0;
+      const c = s.cost;
+      const tip = `server ${eur(c.server)} + backups ${eur(c.backups)} + IPs ${eur(c.ips)} + volumes ${eur(c.volumes)} + overage ${eur(c.overage)}`;
+      return `<tr data-id="${s.id}" class="${s.id===selected?'sel':''}">
+        <td class="pcol">${esc(s.project)}</td><td><b>${esc(s.name)}</b></td>
+        <td><span class="dot ${esc(s.status)}"></span>${esc(s.status)}</td>
+        <td>${esc(s.type)} <span class="muted">${s.cores}c / ${s.memory}GB / ${s.disk}GB</span></td>
+        <td>${esc(s.location)}, ${esc(s.country)}</td>
+        <td>${esc(s.ipv4 || "–")}</td>
+        <td>${s.backups ? `<span class="tag ok" title="Window ${esc(s.backupWindow)} UTC">on</span>` : `<span class="tag bad">off</span>`}</td>
+        <td><span class="bar ${used>.8?'hot':''}"><i style="width:${Math.min(used*100,100)}%"></i></span> <span class="muted">${bytes(s.traffic.out)} / ${bytes(s.traffic.included)}</span></td>
+        <td title="${esc(tip)}">${eur(c.total)}${s.priceSource==="list" ? ` <span class="tag idle" title="List price from the API; add an override in prices.json if this server is cheaper">list</span>` : ""}</td></tr>`;
+    }).join("") || `<tr><td colspan="9" class="muted">No servers in this project.</td></tr>`;
+    renderExtras(data);
+    renderStorage(data);
+    $("#updated").textContent = "Updated " + new Date().toLocaleTimeString();
+    if (selected) showDetail(selected, false);
+  } catch (e) {
+    $("#rows").innerHTML = `<tr><td colspan="9" class="err">${esc(e.message)}</td></tr>`;
+  }
+}
+
+function lineChart(title, unit, series, fmt) {
+  const W = 400, H = 150, pad = {l:44, r:8, t:6, b:18};
+  const all = series.flatMap((s) => s.points);
+  if (!all.length) return `<div class="card chart"><h3>${title}</h3><div class="muted">No data</div></div>`;
+  const t0 = Math.min(...all.map(p=>p[0])), t1 = Math.max(...all.map(p=>p[0]));
+  const max = Math.max(...all.map(p=>p[1]), 1e-9) * 1.1;
+  const x = (t) => pad.l + (t - t0) / ((t1 - t0) || 1) * (W - pad.l - pad.r);
+  const y = (v) => H - pad.b - v / max * (H - pad.t - pad.b);
+  const grid = [0, .5, 1].map((f) => `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y(max*f)}" y2="${y(max*f)}" stroke="var(--line)"/><text x="${pad.l-4}" y="${y(max*f)+3}" text-anchor="end">${fmt(max*f)}</text>`).join("");
+  const fmtT = (t) => new Date(t).toLocaleString([], hours>48 ? {month:"short",day:"numeric"} : {hour:"2-digit",minute:"2-digit"});
+  const lines = series.map((s) => `<polyline fill="none" stroke="${s.color}" stroke-width="1.6" points="${s.points.map(p=>x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)).join(" ")}"/>`).join("");
+  const legend = series.length > 1 ? `<div class="legend">${series.map(s=>`<b style="background:${s.color}"></b>${s.name}`).join("")}</div>` : "";
+  return `<div class="card chart"><h3>${title}</h3>${legend}<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${lines}
+    <text x="${pad.l}" y="${H-4}">${fmtT(t0)}</text><text x="${W-pad.r}" y="${H-4}" text-anchor="end">${fmtT(t1)}</text></svg></div>`;
+}
+
+async function showDetail(id, scroll = true) {
+  selected = id;
+  const s = servers.find((x) => x.id === id);
+  if (!s) return;
+  document.querySelectorAll("#rows tr").forEach((r) => r.classList.toggle("sel", Number(r.dataset.id) === id));
+  const box = $("#detail");
+  box.hidden = false;
+  const labels = Object.entries(s.labels).map(([k,v]) => `<span>${esc(k)}=${esc(v)}</span>`).join("");
+  const head = `<div class="detail-head"><div><b style="font-size:16px">${esc(s.name)}</b>
+      <span class="muted"> · ${esc(s.image || "")} · ${esc(s.ipv6 || "")} · created ${new Date(s.created).toLocaleDateString()}</span>
+      <div class="labels">${labels}</div></div>
+    <div class="range">${[[1,"1h"],[24,"24h"],[168,"7d"],[720,"30d"]].map(([h,l])=>`<button data-h="${h}" class="${h===hours?'on':''}">${l}</button>`).join("")}</div></div>`;
+  if (s.status !== "running") { box.innerHTML = head + `<div class="muted">Metrics are only available while the server is running.</div>`; return; }
+  try {
+    const m = (await api(`/api/metrics?id=${id}&project=${encodeURIComponent(s.project)}&hours=${hours}`)).series;
+    box.innerHTML = head + `<div class="charts">` +
+      lineChart("CPU", "%", [{name:"cpu", color:"var(--c1)", points:m.cpu || []}], (v) => v.toFixed(0) + "%") +
+      lineChart("Network", "bit/s", [
+        {name:"in", color:"var(--c1)", points:m["network.0.bandwidth.in"] || []},
+        {name:"out", color:"var(--c2)", points:m["network.0.bandwidth.out"] || []}], (v) => bits(v * 8)) +
+      lineChart("Disk throughput", "B/s", [
+        {name:"read", color:"var(--c1)", points:m["disk.0.bandwidth.read"] || []},
+        {name:"write", color:"var(--c2)", points:m["disk.0.bandwidth.write"] || []}], (v) => bytes(v) + "/s") +
+      `</div>`;
+  } catch (e) {
+    box.innerHTML = head + `<div class="err">${esc(e.message)}</div>`;
+  }
+  if (scroll) box.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+$("#rows").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-id]"); if (tr) showDetail(Number(tr.dataset.id)); });
+$("#detail").addEventListener("click", (e) => { const b = e.target.closest("button[data-h]"); if (b) { hours = Number(b.dataset.h); showDetail(selected, false); } });
+$("#refresh").addEventListener("click", load);
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>
