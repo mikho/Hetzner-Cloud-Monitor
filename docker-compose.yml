@@ -1,0 +1,14 @@
+services:
+  dashboard:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # Bound to localhost by default; put a reverse proxy (TLS) in front,
+    # or change to "3000:3000" if you set DASHBOARD_PASSWORD and accept plain HTTP.
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./prices.json:/config/prices.json:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
