@@ -4,6 +4,10 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const store = require("./lib/store");
+const agents = require("./lib/agents");
+const ssh = require("./lib/ssh");
+const alerts = require("./lib/alerts");
 
 const PORT = Number(process.env.PORT || 3000);
 const PASSWORD = process.env.DASHBOARD_PASSWORD || "";
@@ -292,7 +296,223 @@ function projectFrom(q) {
   return p;
 }
 
+
+// ---- Agents and alerts ----
+
+const AGENT_PORT = 7411;
+const bad = (msg, status = 400) => Object.assign(new Error(msg), { status });
+
+// What clients may see of an agent. The secret, certificate and known_hosts
+// stay in the backend.
+function publicAgent(a, st) {
+  return {
+    id: a.id, name: a.name, sshHost: a.sshHost, sshPort: a.sshPort, sshUser: a.sshUser,
+    hostKeyFingerprint: a.hostKeyFingerprint, agentHost: a.agentHost, agentPort: a.agentPort,
+    listen: a.listen, allowFrom: a.allowFrom, docker: a.docker, fingerprint: a.fingerprint,
+    version: a.version, arch: a.arch, os: a.os, hetznerId: a.hetznerId, createdAt: a.createdAt,
+    status: !st ? "pending" : st.ok ? "online" : "offline",
+    error: st?.ok ? null : st?.error || null,
+    lastOk: st?.lastOk || null,
+    snapshot: st?.snapshot || null,
+  };
+}
+
+async function monitor() {
+  const warnings = [];
+  let data = null;
+  try {
+    data = await allProjects();
+    warnings.push(...data.warnings);
+  } catch (e) {
+    warnings.push(`hetzner: ${e.message}`);
+  }
+  const t = alerts.thresholds();
+  const list = store.listAgents();
+  const byServer = new Map();
+  for (const a of list) {
+    const sid = agents.statusOf(a.id)?.snapshot?.host?.serverID ?? a.hetznerId;
+    if (sid) byServer.set(Number(sid), a);
+  }
+  const linked = new Set();
+  const entry = (key, h, a) => {
+    const st = a ? agents.statusOf(a.id) : null;
+    const ev = alerts.evaluate(key, { hetzner: h, agent: a, status: st, createdAt: a?.createdAt }, t);
+    return {
+      key, name: h?.name || a.name, project: h?.project || null,
+      hetzner: h, agent: a ? publicAgent(a, st) : null,
+      level: ev.level, alerts: ev.alerts,
+    };
+  };
+  const servers = [];
+  for (const h of data?.servers || []) {
+    const a = byServer.get(h.id) || null;
+    if (a) linked.add(a.id);
+    servers.push(entry(`hcloud:${h.id}`, h, a));
+  }
+  for (const a of list) if (!linked.has(a.id)) servers.push(entry(`agent:${a.id}`, null, a));
+  return { servers, warnings, time: Date.now() };
+}
+
+// One SSH operation per host at a time.
+const busy = new Set();
+async function exclusive(host, fn) {
+  if (busy.has(host)) throw bad("another operation is already running on this server", 409);
+  busy.add(host);
+  try {
+    return await fn();
+  } finally {
+    busy.delete(host);
+  }
+}
+
+function sshFrom(b) {
+  const c = b?.ssh || {};
+  return {
+    host: c.host, port: c.port, user: c.user, hostKeyFingerprint: c.hostKeyFingerprint,
+    auth: c.auth, sudoPassword: c.sudoPassword,
+  };
+}
+
+const firewallHint = (a) =>
+  `The dashboard connects to ${a.agentHost}:${a.agentPort} (TCP). Allow that port only from the dashboard's address: ` +
+  `in a Hetzner Cloud Firewall add an inbound TCP rule for port ${a.agentPort} with the dashboard's IP as source; ` +
+  `with ufw run: sudo ufw allow from <dashboard-ip> to any port ${a.agentPort} proto tcp. ` +
+  `Over Tailscale or a private network no public rule is needed.`;
+
+function agentOr404(id) {
+  const a = store.getAgent(String(id || ""));
+  if (!a) throw bad("unknown agent", 404);
+  return a;
+}
+
+const actions = {
+  // Step 1: the user checks this fingerprint before sending any credentials.
+  async "POST /api/agents/hostkeys"(b) {
+    return { keys: await ssh.scanHostKeys(b.host, b.port) };
+  },
+  // Step 2: log in and look at the server without changing anything.
+  async "POST /api/agents/probe"(b) {
+    const conn = sshFrom(b);
+    return exclusive(String(conn.host), () => ssh.withSession(conn, (s) => ssh.probeWith(s)));
+  },
+  // Step 3: install and pair.
+  async "POST /api/agents"(b) {
+    store.dataKey();
+    const conn = sshFrom(b);
+    const o = b.options || {};
+    const agentPort = ssh.checkPort(o.agentPort, AGENT_PORT);
+    const listen = ssh.checkListen(o.listen);
+    const allowFrom = ssh.checkIpList(o.allowFrom);
+    const agentHost = ssh.checkHost(o.agentHost || listen || conn.host);
+    const hetznerId = o.hetznerId ? Number(o.hetznerId) : null;
+    if (hetznerId !== null && !Number.isInteger(hetznerId)) throw bad("invalid hetznerId");
+    const name = String(o.name || conn.host || "").trim().slice(0, 64);
+    const docker = o.docker === true;
+    const id = crypto.randomBytes(8).toString("hex");
+    const secret = crypto.randomBytes(32).toString("hex");
+
+    return exclusive(String(conn.host), () =>
+      ssh.withSession(conn, async (s) => {
+        const p = await ssh.probeWith(s);
+        if (!p.systemd) throw bad("this server does not run systemd");
+        if (!p.arch) throw bad(`unsupported architecture ${p.machine}`);
+        if (!p.rootOk) throw bad(`root access failed: ${p.rootError}`, 403);
+        if (docker && !p.docker) throw bad("Docker is not installed on this server");
+        const dir = await ssh.upload(s, p.arch, secret);
+        const res = await ssh.runInstall(s, `${dir}/hdash-agent`,
+          ssh.installFlags({ secret: true, dir, port: agentPort, listen, allowFrom, docker }), dir);
+        // An earlier pairing with this host now has a dead key.
+        for (const old of store.listAgents()) {
+          if (old.sshHost === s.host && old.sshPort === s.port) {
+            store.removeAgent(old.id);
+            agents.forget(old.id);
+          }
+        }
+        const rec = store.saveAgent({
+          id, name, sshHost: s.host, sshPort: s.port, sshUser: s.user, knownHosts: s.knownHosts,
+          hostKeyFingerprint: conn.hostKeyFingerprint, agentHost, agentPort, listen, allowFrom,
+          docker: res.docker, cert: res.cert, fingerprint: new crypto.X509Certificate(res.cert).fingerprint256,
+          version: res.version, arch: p.arch, os: p.os, hetznerId, createdAt: Date.now(),
+        }, secret);
+        await agents.pollSoon(rec, 3);
+        return { agent: publicAgent(rec, agents.statusOf(id)), firewall: firewallHint(rec) };
+      })
+    );
+  },
+  // Changes on an installed agent. Each one needs SSH credentials again.
+  async "POST /api/agents/action"(b) {
+    const a = agentOr404(b.id);
+    const conn = {
+      host: a.sshHost, port: a.sshPort, user: a.sshUser, knownHosts: a.knownHosts,
+      auth: b.ssh?.auth, sudoPassword: b.ssh?.sudoPassword,
+    };
+    const action = String(b.action || "");
+    if (!["upgrade", "docker-on", "docker-off", "rotate", "uninstall"].includes(action)) throw bad("unknown action");
+    return exclusive(a.sshHost, () =>
+      ssh.withSession(conn, async (s) => {
+        if (action === "uninstall") {
+          const r = await s.asRoot(`${ssh.REMOTE_BIN} uninstall`);
+          if (r.code !== 0) throw bad(`uninstall failed: ${r.stderr.trim().slice(0, 300)}`, 502);
+          store.removeAgent(a.id);
+          agents.forget(a.id);
+          return { removed: true };
+        }
+        let res;
+        let secret = null;
+        if (action === "docker-on" || action === "docker-off") {
+          res = await ssh.runInstall(s, ssh.REMOTE_BIN, ssh.installFlags({ docker: action === "docker-on" }));
+        } else {
+          const p = await ssh.probeWith(s);
+          if (!p.rootOk) throw bad(`root access failed: ${p.rootError}`, 403);
+          if (action === "rotate") secret = crypto.randomBytes(32).toString("hex");
+          const dir = await ssh.upload(s, p.arch, secret);
+          res = await ssh.runInstall(s, `${dir}/hdash-agent`,
+            ssh.installFlags(secret ? { secret: true, dir, rotateCert: true } : {}), dir);
+        }
+        const rec = store.saveAgent({
+          ...a, docker: res.docker, version: res.version, cert: res.cert,
+          fingerprint: new crypto.X509Certificate(res.cert).fingerprint256,
+        }, secret);
+        await agents.pollSoon(rec);
+        return { agent: publicAgent(rec, agents.statusOf(rec.id)) };
+      })
+    );
+  },
+  // Rename, or reach the agent on another address (for example a Tailscale IP).
+  async "POST /api/agents/update"(b) {
+    const a = agentOr404(b.id);
+    const next = { ...a };
+    if (b.name !== undefined) next.name = String(b.name).trim().slice(0, 64) || a.name;
+    if (b.agentHost !== undefined) next.agentHost = ssh.checkHost(b.agentHost);
+    const rec = store.saveAgent(next);
+    await agents.pollOne(rec);
+    return { agent: publicAgent(rec, agents.statusOf(rec.id)) };
+  },
+  // Forget an agent without touching the server (for a server that is gone).
+  async "DELETE /api/agents"(_b, q) {
+    const a = agentOr404(q.get("id"));
+    store.removeAgent(a.id);
+    agents.forget(a.id);
+    return { removed: true };
+  },
+  async "PUT /api/thresholds"(b) {
+    return alerts.save(b);
+  },
+};
+
 const routes = {
+  async "/api/monitor"() {
+    return monitor();
+  },
+  async "/api/thresholds"() {
+    return alerts.thresholds();
+  },
+  async "/api/agents/history"(q) {
+    const a = agentOr404(q.get("id"));
+    const hours = Math.min(Math.max(Number(q.get("hours")) || 24, 1), 24 * 7);
+    const since = Math.floor(Date.now() / 1000) - hours * 3600;
+    return agents.agentGet(a, `/v1/history?since=${since}`);
+  },
   async "/api/servers"() {
     return allProjects();
   },
@@ -342,6 +562,41 @@ function authorized(req) {
   return crypto.timingSafeEqual(a, b);
 }
 
+const MAX_BODY = 512 * 1024;
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(bad("request body too large", 413));
+        req.destroy();
+      } else chunks.push(c);
+    });
+    req.on("end", () => {
+      if (!chunks.length) return resolve({});
+      try {
+        const v = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        resolve(v && typeof v === "object" ? v : {});
+      } catch {
+        reject(bad("invalid JSON"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+// Changes need a password to be configured, and a custom header plus a JSON
+// body, which a browser will not send cross-site without a CORS preflight
+// (which this server never approves).
+function adminCheck(req) {
+  if (!PASSWORD) throw bad("set DASHBOARD_PASSWORD to enable agent management and threshold changes", 403);
+  if (req.headers["x-hdash-client"] !== "1" || !/^application\/json\b/.test(req.headers["content-type"] || "")) {
+    throw bad("missing X-Hdash-Client header or JSON content type", 403);
+  }
+}
+
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css" };
 
 http
@@ -352,7 +607,15 @@ http
       return void res.end("Unauthorized");
     }
     const url = new URL(req.url, "http://x");
-    const handler = routes[url.pathname];
+    const action = req.method !== "GET" && req.method !== "HEAD" ? actions[`${req.method} ${url.pathname}`] : null;
+    const handler = req.method === "GET" || req.method === "HEAD" ? routes[url.pathname] : action && ((q) => {
+      adminCheck(req);
+      return readBody(req).then((b) => action(b, q));
+    });
+    if (!handler && req.method !== "GET" && req.method !== "HEAD") {
+      res.writeHead(url.pathname.startsWith("/api/") ? 404 : 405, { "Content-Type": "application/json" });
+      return void res.end(JSON.stringify({ error: "not found" }));
+    }
     if (handler) {
       try {
         const data = await handler(url.searchParams);
@@ -373,3 +636,5 @@ http
     fs.createReadStream(file).pipe(res);
   })
   .listen(PORT, () => console.log(`Dashboard listening on :${PORT}`));
+
+agents.startPolling();

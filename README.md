@@ -11,6 +11,14 @@ A small, self-hosted dashboard for your Hetzner Cloud project, run in Docker.
 
 The Hetzner API token stays on the server side. The browser never sees it, and the app only reads from the API.
 
+Optional, on top of that:
+
+- A **macOS app** (`macos/`) that is a client of this backend: server list, alerts, notifications, charts.
+- A read-only **agent** (`agent/`) for each Linux server, installed from the app over SSH, for memory, disks, systemd failures, pending reboots, **available package updates** and Docker containers.
+- **Alert levels** (warning and critical) for every monitoring point, as defaults and per server, set from the app.
+
+See [docs/AGENT.md](docs/AGENT.md) for how the agent works and its security model.
+
 ## Requirements
 
 - Docker with Compose (Docker Desktop, OrbStack, or Docker Engine + the compose plugin)
@@ -47,6 +55,7 @@ Set these in `.env`:
 | `DASHBOARD_PASSWORD` | empty | If set, the dashboard asks for HTTP basic auth. Any username, this password. |
 | `PRICE_BASIS` | `gross` | `gross` shows prices including VAT, `net` shows prices excluding VAT. |
 | `HETZNER_STORAGE_TOKEN[_<NAME>]` | the project's cloud token | Optional. Storage Boxes are read from `api.hetzner.com`. Set this only if a project's Cloud token is rejected there. Use the same `<NAME>` as the project's token. |
+| `DATA_KEY` | empty | Needed for agents. 64 hex characters (`openssl rand -hex 32`). Encrypts the agents' keys in `./data`. If you lose or change it, re-pair the agents. |
 | `PORT` | `3000` | Port inside the container. If you change it, update the port mapping in `docker-compose.yml` too. |
 
 After changing `.env`, apply it with `docker compose up -d`.
@@ -64,6 +73,18 @@ HCLOUD_TOKEN_CLIENT_ACME=zzzzzzzz
 Then run `docker compose up -d`. With more than one project the table gets a Project column, and the totals, cost breakdown and resource lists add everything together. If one project fails (for example an expired token), the others still load and a warning names the failing project. Project names must be unique, and each token needs only read access.
 
 Debug routes and price overrides work per project: add `&project=production` to `/api/debug/...` URLs (not needed with a single project). Overrides in `prices.json` match by server name across all projects.
+
+## macOS app and agents
+
+1. Set `DASHBOARD_PASSWORD` and `DATA_KEY` in `.env`, then run `mkdir -p data && docker compose up -d --build`. The image builds the agent from source in `agent/`.
+2. Build the app: `./macos/build.sh` (needs Xcode or the Command Line Tools; see the comment in the script if the build reports a missing SwiftUI macro plugin). Open `macos/build/Hetzner Dashboard.app`.
+3. In the app's Settings (⌘,), enter the dashboard URL (default `http://127.0.0.1:3000`) and the password. The password is stored in the Keychain.
+4. Select a server and choose **Install agent…**, or **+** for a server outside Hetzner. The app fetches the SSH host key, you confirm its fingerprint, sign in with a password or a private key, and the backend installs the agent over SSH.
+5. Open the agent's port (default 7411) to the dashboard, only from the dashboard's address. The app shows the rule after install.
+
+Alert levels are set with the slider button (defaults) or the bell button on a server (overrides). The backend evaluates them, so every client sees the same alerts. The app notifies you when an alert starts, gets worse, or clears.
+
+The app refuses to send SSH credentials over plain HTTP to anything other than this Mac. If the dashboard runs elsewhere, put it behind HTTPS.
 
 ## Price overrides
 
@@ -146,7 +167,7 @@ The port is bound to `127.0.0.1` on purpose. To reach the dashboard from elsewhe
 
 Avoid changing the mapping to `"3000:3000"` on an internet-facing machine without HTTPS and a password.
 
-Never commit `.env`. It contains your API token.
+Never commit `.env`. It contains your API token, and with agents also `DATA_KEY`. It is listed in `.gitignore`.
 
 ## API
 
@@ -158,7 +179,24 @@ All routes are read-only and use the same password if one is set.
 | `GET /api/metrics?id=<id>&project=<name>&hours=<n>` | CPU, disk and network time series for one server (1 to 720 hours). |
 | `GET /api/debug/server?id=<id>` | Raw Hetzner API object for one server. Useful for checking prices and locations. |
 | `GET /api/debug/storage-boxes` | Raw Storage Box API response and HTTP status for your token. Useful when no boxes show up. |
+| `GET /api/monitor` | Servers merged with agent data, and the alerts for each. |
+| `GET /api/thresholds` | Alert metrics, default levels and per-server overrides. |
+| `GET /api/agents/history?id=<agent>&hours=<n>` | CPU, memory, disk and load history from an agent (up to 7 days). |
 | `GET /healthz` | Health check (no auth). |
+
+Changes need `DASHBOARD_PASSWORD` to be set, the header `X-Hdash-Client: 1` and a JSON body:
+
+| Route | Description |
+|---|---|
+| `POST /api/agents/hostkeys` | `{host, port}`: the server's SSH host key fingerprints, to confirm before signing in. |
+| `POST /api/agents/probe` | `{ssh}`: sign in and report OS, architecture, systemd, Docker and root access. Changes nothing. |
+| `POST /api/agents` | `{ssh, options}`: install and pair an agent. |
+| `POST /api/agents/action` | `{id, action, ssh}`: `upgrade`, `docker-on`, `docker-off`, `rotate` (new key and certificate) or `uninstall`. |
+| `POST /api/agents/update` | `{id, name?, agentHost?}`: rename, or reach the agent on another address. |
+| `DELETE /api/agents?id=<agent>` | Forget an agent without touching the server. |
+| `PUT /api/thresholds` | `{defaults, servers}`: save alert levels. |
+
+`ssh` is `{host, port, user, hostKeyFingerprint, auth: {type: "password", password} | {type: "key", privateKey, passphrase?}, sudoPassword?}`. For `action`, only `auth` and `sudoPassword` are used.
 
 Responses from the Hetzner API are cached for 30 seconds.
 

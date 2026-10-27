@@ -35,6 +35,7 @@
   .bar { height:6px; border-radius:3px; background:var(--line); width:90px; overflow:hidden; display:inline-block; vertical-align:middle; }
   .bar i { display:block; height:100%; background:var(--c1); }
   .bar.hot i { background:var(--warn); }
+  td.traffic .bar { width:48px; display:block; margin-bottom:4px; } td.traffic .muted { font-size:12px; }
   #detail { margin-top:20px; }
   .detail-head { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
   .range button { background:none; border:1px solid var(--line); color:var(--text); padding:4px 10px; cursor:pointer; font:inherit; }
@@ -171,7 +172,7 @@ async function load() {
         <td>${esc(s.location)}, ${esc(s.country)}</td>
         <td>${esc(s.ipv4 || "–")}</td>
         <td>${s.backups ? `<span class="tag ok" title="Window ${esc(s.backupWindow)} UTC">on</span>` : `<span class="tag bad">off</span>`}</td>
-        <td><span class="bar ${used>.8?'hot':''}"><i style="width:${Math.min(used*100,100)}%"></i></span> <span class="muted">${bytes(s.traffic.out)} / ${bytes(s.traffic.included)}</span></td>
+        <td class="traffic"><span class="bar ${used>.8?'hot':''}"><i style="width:${Math.min(used*100,100)}%"></i></span><span class="muted">${bytes(s.traffic.out)} / ${bytes(s.traffic.included)}</span></td>
         <td title="${esc(tip)}">${eur(c.total)}${s.priceSource==="list" ? ` <span class="tag idle" title="List price from the API; add an override in prices.json if this server is cheaper">list</span>` : ""}</td></tr>`;
     }).join("") || `<tr><td colspan="9" class="muted">No servers in this project.</td></tr>`;
     renderExtras(data);

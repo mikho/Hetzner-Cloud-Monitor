@@ -9,6 +9,11 @@ services:
       - "127.0.0.1:3000:3000"
     volumes:
       - ./prices.json:/config/prices.json:ro
+      # Paired agents (secrets encrypted with DATA_KEY) and alert thresholds.
+      - ./data:/data
+    # SSH credentials live here for the length of one install, in memory only.
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

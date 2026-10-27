@@ -1,0 +1,7 @@
+.env
+prices.json
+data/
+agent-bin/
+macos/.build/
+macos/build/
+.DS_Store

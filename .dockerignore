@@ -1,4 +1,7 @@
 .env
+prices.json
 .git
 README.md
-prices.json
+data
+macos
+agent-bin
